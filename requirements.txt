@@ -1,0 +1,29 @@
+# zf_opioid -- direct dependencies, pinned to the versions the reference
+# analysis was produced with. Python 3.13.
+#
+#     uv venv --python 3.13 .venv
+#     uv pip install -r requirements.txt
+#   (or: python -m venv .venv  then  .venv/Scripts/pip install -r requirements.txt)
+#
+# torch is pinned to the CPU build the reference results used. On a machine
+# with an NVIDIA GPU you can install the CUDA build of torch/torchvision
+# instead and set inference.device: cuda:0 in params.yaml; detections may then
+# differ from CPU ones in the last decimal places.
+
+# --- analysis ---
+numpy==2.5.2
+pandas==3.0.5
+pyarrow==25.0.1              # parquet I/O
+scipy==1.18.1
+scikit-learn==1.9.1          # PCA and GaussianMixture
+joblib==1.6.0                # parallel null and bootstrap
+matplotlib==3.11.1
+PyYAML==6.0.3                # params.yaml
+
+# --- calibration: images, background model, homography ---
+opencv-python-headless==5.0.0.93
+
+# --- pose inference with models/best.pt (YOLOv11-pose) ---
+ultralytics==8.4.128
+torch==2.13.0
+torchvision==0.28.0

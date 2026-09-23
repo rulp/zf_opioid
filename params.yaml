@@ -1,0 +1,103 @@
+# Pipeline settings. OPTIONAL: every value here is also the built-in default
+# (zfsa/config.py), so this file only matters for values you change. Changing
+# anything outside `metadata` and `inference.device` changes the analysis --
+# keep the defaults if your results should be comparable to other lab members'.
+
+events:
+  artifact_cutoff_s: 10.0   # events before this are detector start-up artifacts
+  bout_gap_s: 5.0           # triggers closer than this are one visit (bout)
+  bin_s: 600.0              # within-run time bins (10 min)
+
+window:                     # analysis window, seconds from run start
+  start_s: 10.0
+  end_s: 2900.0
+
+bouts:
+  refractory_s: 0.6         # pump hardware floor between triggers
+  floor_tol_s: 0.1
+
+blind_time:
+  # Each trigger blinds the rig for a fraction of a second. The constant is
+  # refit on your runs; this value is used only if that fit is unreliable.
+  s_per_trigger: 0.188
+  min_runs_to_fit: 10
+  min_r_squared: 0.99
+
+effort:
+  # Pose features average b random draws of k active bouts per run. Runs with
+  # fewer than k in-window active bouts get no pose features and are not scored.
+  k: 20
+  b: 200
+  seed: 20260907
+
+features:
+  rim_inner: 0.0            # rim band, canonical tank units from the nearest wall
+  rim_outer: 0.08
+  late_min_obs_s: 300.0     # observed late-session time needed for pref_change
+
+inference:
+  weights: models/best.pt   # relative to this folder
+  conf: 0.25
+  iou: 0.65
+  batch: 16
+  device: cpu               # "cuda:0" is much faster on a GPU machine
+  background_samples: 120   # JPEGs per run used to build the calibration background
+
+metadata:
+  # Used only by make_metadata.py when drafting metadata.csv.
+  positive_controls: [MK801, ketamine, methadone, naloxone]
+  # Folder-name spelling -> compound label. Keys are lower-case with anything
+  # that is not a letter or digit removed ("H2CBD_NAT" -> "h2cbdnat").
+  compound_aliases:
+    dmso: DMSO
+    mk801: MK801
+    ketamine: ketamine
+    naloxone: naloxone
+    methadone: methadone
+    hydrocodone: hydrocodone
+    regularcbd: CBD
+    cbd: CBD
+    h2cbdnat: H2CBD_NAT
+    h2cbdnatural: H2CBD_NAT
+    hcbdnat: H2CBD_NAT
+    h2cbdsyn: H2CBD_SYN
+    h4cbdnat: H4CBD_NAT
+    h4cbdnatural: H4CBD_NAT
+    h4cbdsyn: H4CBD_SYN
+    h2ppsyn: H2PP_SYN
+    h2ppsny: H2PP_SYN
+    h4ppsyn: H4PP_SYN
+    h2posyn: H2PO_SYN
+
+analysis:
+  # The 14 features, in matrix order. The order sets random draws, so keep it.
+  features:
+    - inactive_bout_rate_per_obs_min
+    - nontrig_pref_index
+    - pref_change
+    - active_bout_rate_per_obs_min
+    - mean_nn_distance
+    - switch_excess
+    - mean_triggers_per_bout
+    - polarization_nontrigger
+    - bin_slope
+    - frac_in_rim
+    - first_inactive_latency_log
+    - trig_radial_offset
+    - first_active_latency_log
+    - trig_heading_outward
+  seed: 20260907
+  pc_cap: 3                 # at most this many PCs go to the GMM
+  n_parallel_analysis: 1000
+  k_max: 5
+  covariance_types: [spherical, diag, tied, full]
+  n_init: 20
+  tie_dbic: 2.0             # K=1 wins unless beaten by this much BIC
+  min_cluster_n: 1          # 1 = a single run may be a cluster
+  degenerate_eig: 1.0e-4
+  n_null: 1000              # single-Gaussian null replicates
+  n_boot: 500               # bootstrap resamples
+  n_perm: 2000              # label permutations per test
+  mad_sd_min: 0.25
+  runs_per_feature: 6       # below 6 x 14 = 84 runs the report warns
+  n_jobs: -1                # parallel workers; -1 = all cores
