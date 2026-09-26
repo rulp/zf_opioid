@@ -20,7 +20,7 @@ import pandas as pd
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from zfsa import bouts, config, features, geometry, gmm, metadata, naming, normalize  # noqa: E402
+from zfsa import bouts, config, features, geometry, gmm, metadata, naming, normalize, paths  # noqa: E402
 
 
 def _homography(scale=3.0, tx=120.0, ty=45.0, rot=0.21):
@@ -94,14 +94,16 @@ def test_exposure_offset():
 def test_effort_subsample_is_without_replacement():
     B = pd.DataFrame({"run_id": ["r"] * 30, "gap_s": 5.0, "platform": "active",
                       "bout_id": range(30), "in_window": True})
-    idx, status = bouts.effort_subsample_index(B, k=20, b=50, seed=7)
+    idx, status = bouts.effort_subsample_index(B, ["r"], k=20, b=50, seed=7)
     assert status.effort_equalized.all()
     per = idx.groupby("draw").bout_id.agg(["size", "nunique"])
     assert (per["size"] == 20).all() and (per["nunique"] == 20).all(), "drew a duplicate"
-    idx2, _ = bouts.effort_subsample_index(B, k=20, b=50, seed=7)
+    idx2, _ = bouts.effort_subsample_index(B, ["r"], k=20, b=50, seed=7)
     assert idx.equals(idx2), "not reproducible from the seed"
-    _, st = bouts.effort_subsample_index(B.iloc[:8].copy(), k=20, b=50, seed=7)
+    _, st = bouts.effort_subsample_index(B.iloc[:8].copy(), ["r"], k=20, b=50, seed=7)
     assert not st.effort_equalized.any(), "a run below k must not be rescued"
+    _, st = bouts.effort_subsample_index(B, ["r", "empty"], k=20, b=50, seed=7)
+    assert st.set_index("run_id").loc["empty", "n_bouts_available"] == 0, "a run with no bouts must be reported"
 
 
 def test_eb_centering_tracks_the_day_effect():
@@ -131,8 +133,9 @@ def test_permutation_preserves_the_day_structure():
     cond = np.array(["DMSO", "X", "Y", "DMSO", "X", "Z", "DMSO", "Y", "Z"])
     date = np.array(["d1"] * 3 + ["d2"] * 3 + ["d3"] * 3)
     rng = np.random.default_rng(3)
+    groups = gmm.strata_groups(date)
     for _ in range(50):
-        perm = gmm.permute_within(cond, date, rng)
+        perm = gmm.permute_within(cond, groups, rng)
         for d in np.unique(date):
             assert sorted(cond[date == d]) == sorted(perm[date == d]), "label set changed within a day"
 
@@ -162,10 +165,10 @@ def test_naming():
 def _fake_runs(root: Path, names: list[str]) -> None:
     for n in names:
         d = root / n
-        (d / "images").mkdir(parents=True)
-        for f in ("active_events.tsv", "inactive_events.tsv"):
+        (d / paths.IMAGES_SUBDIR).mkdir(parents=True)
+        for f in (paths.ACTIVE_TSV, paths.INACTIVE_TSV):
             (d / f).write_text("frame_idx\tt_seconds\tsignal\tbaseline\n", encoding="utf-8")
-        (d / "params.json").write_text(json.dumps({}), encoding="utf-8")
+        (d / paths.PARAMS_JSON).write_text(json.dumps({}), encoding="utf-8")
 
 
 def test_metadata_draft_and_validation():

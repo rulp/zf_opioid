@@ -122,14 +122,16 @@ def fit_blind_time(
 
 
 def summarise_run(
-    run_dir: Path,
+    ev: pd.DataFrame,
     *,
     window: tuple[float, float],
     bout_gap_s: float,
     artifact_cutoff_s: float,
 ) -> dict:
-    """Per-run event counts, raw and corrected, plus duration and last frame."""
-    ev = read_run_events(run_dir)
+    """Per-run event counts, raw and corrected, plus duration and last frame.
+
+    ``ev`` is one run's events from :func:`read_run_events`.
+    """
     act = ev[ev.platform == "active"]
     ina = ev[ev.platform == "inactive"]
 
@@ -158,19 +160,22 @@ def summarise_run(
 
 
 def build_events_table(
-    run_dirs: dict[str, Path],
+    run_events: dict[str, pd.DataFrame],
     *,
     window: tuple[float, float],
     bout_gap_s: float,
     bin_s: float,
     artifact_cutoff_s: float,
 ) -> pd.DataFrame:
-    """One row per event across all runs, with bout, bin and window flags."""
+    """One row per event across all runs, with bout, bin and window flags.
+
+    ``run_events`` maps run id to that run's :func:`read_run_events` table.
+    """
     frames = []
-    for run_id, d in run_dirs.items():
-        ev = read_run_events(d)
+    for run_id, ev in run_events.items():
         if ev.empty:
             continue
+        ev = ev.copy()
         ev.insert(0, "run_id", run_id)
         ev["is_artifact"] = ev.t_seconds < artifact_cutoff_s
         ev["in_window"] = ev.t_seconds.between(*window)

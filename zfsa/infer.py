@@ -47,6 +47,15 @@ OUTPUT_COLUMNS = [
 ]
 
 
+def _box_centres(boxes: np.ndarray) -> np.ndarray:
+    """(n, 2) centres of xyxy boxes."""
+    return np.column_stack([(boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2])
+
+
+def _box_areas(boxes: np.ndarray) -> np.ndarray:
+    return (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+
+
 def _pairwise_iou(boxes: np.ndarray) -> np.ndarray:
     """IoU between every pair of xyxy boxes."""
     if len(boxes) < 2:
@@ -56,7 +65,7 @@ def _pairwise_iou(boxes: np.ndarray) -> np.ndarray:
     x2 = np.minimum(boxes[:, None, 2], boxes[None, :, 2])
     y2 = np.minimum(boxes[:, None, 3], boxes[None, :, 3])
     inter = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
-    area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    area = _box_areas(boxes)
     union = area[:, None] + area[None, :] - inter
     return inter / np.maximum(union, 1e-9)
 
@@ -71,7 +80,7 @@ def frame_qc(boxes: np.ndarray, confs: np.ndarray, kept: np.ndarray) -> dict:
     """
     k = boxes[kept]
     c = confs[kept]
-    centres = np.column_stack([(k[:, 0] + k[:, 2]) / 2, (k[:, 1] + k[:, 3]) / 2]) if len(k) else np.zeros((0, 2))
+    centres = _box_centres(k)
     if len(centres) >= 2:
         d = np.hypot(centres[:, None, 0] - centres[None, :, 0],
                      centres[:, None, 1] - centres[None, :, 1])
@@ -148,7 +157,8 @@ def predict_run(
             if len(kept) == 0:
                 continue
             b, k = boxes[kept], kps[kept]
-            centre_px = np.column_stack([(b[:, 0] + b[:, 2]) / 2, (b[:, 1] + b[:, 3]) / 2])
+            centre_px = _box_centres(b)
+            areas = _box_areas(b)
 
             # Trigger fish: the one inside the yellow platform ROI. Decided in
             # pixel space, where the ROI is defined.
@@ -164,6 +174,12 @@ def predict_run(
             centre_t = calibration.to_canonical(centre_px.astype(np.float32))
             head_t = calibration.to_canonical(k[:, 0, :].astype(np.float32))
             tail_t = calibration.to_canonical(k[:, 2, :].astype(np.float32))
+            # Ultralytics zeroes the xy of keypoints whose visibility is < 0.5, so
+            # (0, 0) is a placeholder, not a position: mapping it would give a
+            # heading that points at the image corner.
+            unseen = (k == 0).all(axis=2)
+            head_t[unseen[:, 0]] = np.nan
+            tail_t[unseen[:, 2]] = np.nan
             heading = _heading(head_t, tail_t)
 
             for slot in range(len(kept)):
@@ -180,8 +196,8 @@ def predict_run(
                         "tail_x": float(tail_t[slot, 0]),
                         "tail_y": float(tail_t[slot, 1]),
                         "heading_rad": float(heading[slot]),
-                        "bbox_area": float((b[slot, 2] - b[slot, 0]) * (b[slot, 3] - b[slot, 1])),
-                        "conf": float(confs[kept][slot]),
+                        "bbox_area": float(areas[slot]),
+                        "conf": float(confs[kept[slot]]),
                         "is_trigger_fish": bool(slot == trigger_slot),
                     }
                 )

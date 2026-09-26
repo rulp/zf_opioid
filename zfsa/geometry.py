@@ -66,35 +66,19 @@ class Background:
 
     run_id: str
     median_bgr: np.ndarray  # (H, W, 3) uint8
-    median_gray: np.ndarray  # (H, W) float32
-    mad_gray: np.ndarray  # (H, W) float32
     n_samples: int
 
-    @property
-    def scale(self) -> np.ndarray:
-        """Robust per-pixel sigma, floored so quiet pixels cannot blow up."""
-        return np.maximum(self.mad_gray * 1.4826, 2.5)
-
     def save(self, path: Path) -> None:
-        np.savez_compressed(
-            path,
-            median_bgr=self.median_bgr,
-            median_gray=self.median_gray,
-            mad_gray=self.mad_gray,
-            n_samples=self.n_samples,
-            run_id=self.run_id,
-        )
+        np.savez_compressed(path, median_bgr=self.median_bgr, n_samples=self.n_samples, run_id=self.run_id)
 
     @classmethod
     def load(cls, path: Path) -> "Background":
         z = np.load(path, allow_pickle=False)
-        return cls(
-            run_id=str(z["run_id"]),
-            median_bgr=z["median_bgr"],
-            median_gray=z["median_gray"].astype(np.float32),
-            mad_gray=z["mad_gray"].astype(np.float32),
-            n_samples=int(z["n_samples"]),
-        )
+        return cls(run_id=str(z["run_id"]), median_bgr=z["median_bgr"], n_samples=int(z["n_samples"]))
+
+
+def background_cache_path(cache_dir: Path, run_id: str) -> Path:
+    return Path(cache_dir) / f"bg_{run_id}.npz"
 
 
 def build_background(
@@ -104,7 +88,7 @@ def build_background(
     seed: int = 0,
     cache_dir: Path | None = None,
 ) -> Background:
-    """Per-pixel median and MAD over randomly sampled trigger frames.
+    """Per-pixel median over randomly sampled trigger frames.
 
     Trigger frames are conditioned on a fish being over the *active* platform,
     so a fish is present there in nearly every sampled frame. The median still
@@ -114,7 +98,7 @@ def build_background(
     With ``cache_dir`` the model is saved there and reused on later calls.
     """
     run_id = paths.run_stamp(run_dir)
-    cache_path = Path(cache_dir) / f"bg_{run_id}.npz" if cache_dir is not None else None
+    cache_path = background_cache_path(cache_dir, run_id) if cache_dir is not None else None
     if cache_path is not None and cache_path.exists():
         return Background.load(cache_path)
 
@@ -127,11 +111,8 @@ def build_background(
 
     stack = np.stack([cv2.imread(str(p)) for p in sel])
     median_bgr = np.median(stack, axis=0).astype(np.uint8)
-    gray = stack.mean(axis=3).astype(np.float32)
-    median_gray = np.median(gray, axis=0).astype(np.float32)
-    mad_gray = np.median(np.abs(gray - median_gray), axis=0).astype(np.float32)
 
-    bg = Background(run_id, median_bgr, median_gray, mad_gray, k)
+    bg = Background(run_id, median_bgr, k)
     if cache_path is not None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         bg.save(cache_path)

@@ -101,7 +101,7 @@ depends on the whole set.
 
 Useful options:
 - `--stop-after check` validates the metadata and folders only.
-- `--force pose` redoes inference, e.g. after changing the model.
+- `--force pose` redoes inference. It is rarely needed: changing the model file, the inference settings, the image count or the calibration already invalidates a run's cached pose results.
 - `--params other.yaml` uses a different settings file.
 
 ## 4. Read the results

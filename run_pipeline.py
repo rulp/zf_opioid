@@ -42,18 +42,14 @@ def log(msg: str = "") -> None:
 
 
 def sha256(p: Path) -> str:
-    h = hashlib.sha256()
     with open(p, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+        return hashlib.file_digest(fh, "sha256").hexdigest()
 
 
 # ------------------------------------------------------------------- stages
 def stage_check(project: paths.Project, metadata_csv: Path) -> tuple[pd.DataFrame, dict, list[str]]:
     runs, run_dirs, warns = metadata.load(metadata_csv, project.runs_dir)
-    bad = {rid: paths.missing_files(d) for rid, d in run_dirs.items()}
-    bad = {k: v for k, v in bad.items() if v}
+    bad = {rid: m for rid, d in run_dirs.items() if (m := paths.missing_files(d))}
     if bad:
         lines = "\n".join(f"  {run_dirs[k].name}: missing {', '.join(v)}" for k, v in bad.items())
         raise SystemExit(f"run folder(s) missing required files:\n{lines}\n"
@@ -75,13 +71,14 @@ def stage_check(project: paths.Project, metadata_csv: Path) -> tuple[pd.DataFram
     return runs, run_dirs, warns
 
 
-def stage_events(project, cfg, runs, run_dirs, warns) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+def stage_events(cfg, runs, run_dirs, warns) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     ev_cfg = cfg["events"]
     window = config.window(cfg)
+    run_events = {rid: events.read_run_events(d) for rid, d in run_dirs.items()}
     summ = pd.DataFrame([
-        {"run_id": rid, **events.summarise_run(d, window=window, bout_gap_s=ev_cfg["bout_gap_s"],
+        {"run_id": rid, **events.summarise_run(ev, window=window, bout_gap_s=ev_cfg["bout_gap_s"],
                                                 artifact_cutoff_s=ev_cfg["artifact_cutoff_s"])}
-        for rid, d in run_dirs.items()])
+        for rid, ev in run_events.items()])
     R = runs.merge(summ, on="run_id", how="left")
 
     bt = cfg["blind_time"]
@@ -99,7 +96,7 @@ def stage_events(project, cfg, runs, run_dirs, warns) -> tuple[pd.DataFrame, pd.
     if len(short):
         log(f"  {len(short)} run(s) end before the window end ({window[1]:.0f} s); kept, rates use observed time")
 
-    E = events.build_events_table(run_dirs, window=window, bout_gap_s=ev_cfg["bout_gap_s"],
+    E = events.build_events_table(run_events, window=window, bout_gap_s=ev_cfg["bout_gap_s"],
                                   bin_s=ev_cfg["bin_s"], artifact_cutoff_s=ev_cfg["artifact_cutoff_s"])
     blind = {"s_per_trigger": blind_s, "source": source, "fit": str(fit),
              "fit_s_per_trigger": fit.blind_s_per_trigger, "fit_r_squared": fit.r_squared}
@@ -115,9 +112,7 @@ def stage_calibration(project, cfg, run_dirs, force: bool, warns) -> pd.DataFram
             rows.append(json.loads(cp.read_text(encoding="utf-8")))
             continue
         if force:
-            bgp = project.cache_dir / f"bg_{rid}.npz"
-            if bgp.exists():
-                bgp.unlink()
+            geometry.background_cache_path(project.cache_dir, rid).unlink(missing_ok=True)
         row = geometry.calibrate_run(d, n_samples=n_samples, cache_dir=project.cache_dir)
         cp.write_text(json.dumps(row, default=float), encoding="utf-8")
         rows.append(row)
@@ -147,29 +142,32 @@ def stage_pose(project, cfg, run_dirs, cal, force: bool) -> tuple[pd.DataFrame, 
     for rid, d in run_dirs.items():
         dp, qp, kp = (project.cache_dir / f"pose_{rid}.parquet", project.cache_dir / f"poseqc_{rid}.parquet",
                       project.cache_dir / f"pose_{rid}.json")
+        H = np.array([list(x) for x in cal_i.loc[rid, "H"]], dtype=np.float64)
         n_img = len(paths.trigger_images(d))
+        # Detections are stored in canonical coordinates, so they are stale
+        # whenever the run's homography changes (e.g. --force calibration).
+        run_key = {**key, "n_images": n_img, "calibration_H": H.tolist()}
         fresh = (not force and dp.exists() and qp.exists() and kp.exists()
-                 and json.loads(kp.read_text()) == {**key, "n_images": n_img})
+                 and json.loads(kp.read_text(encoding="utf-8")) == run_key)
         if fresh:
             det_parts.append(pd.read_parquet(dp))
             qc_parts.append(pd.read_parquet(qp))
         else:
-            todo.append((rid, d, dp, qp, kp, n_img))
+            todo.append((rid, d, dp, qp, kp, H, n_img, run_key))
     log(f"  {len(todo)} run(s) to infer, {len(run_dirs) - len(todo)} from cache")
     t0 = time.time()
-    for i, (rid, d, dp, qp, kp, n_img) in enumerate(todo, 1):
+    for i, (rid, d, dp, qp, kp, H, n_img, run_key) in enumerate(todo, 1):
         if model is None:
             from ultralytics import YOLO
             model = YOLO(str(weights))
         r = cal_i.loc[rid]
-        H = np.array([list(x) for x in r["H"]], dtype=np.float64)
         c = geometry.Calibration(rid, H, int(r.n_calib_points), float(r.rms_reprojection_px),
                                  float(r.max_reprojection_px), [], bool(r.calibration_ok))
         det, qc = infer.predict_run(model, d, c, conf=inf["conf"], iou=inf["iou"],
                                     batch=int(inf["batch"]), device=inf["device"])
         det.to_parquet(dp, index=False)
         qc.to_parquet(qp, index=False)
-        kp.write_text(json.dumps({**key, "n_images": n_img}), encoding="utf-8")
+        kp.write_text(json.dumps(run_key), encoding="utf-8")
         det_parts.append(det)
         qc_parts.append(qc)
         el = time.time() - t0
@@ -205,12 +203,12 @@ def stage_features(cfg, R, E, cal, det, qc, blind_s: float) -> dict[str, pd.Data
                                    window=window, bin_s=cfg["events"]["bin_s"])
     assert (X.observed_time_s >= 0).all()
     e = cfg["effort"]
-    idx, status = bouts.effort_subsample_index(B, k=int(e["k"]), b=int(e["b"]), seed=int(e["seed"]), gap_s=gap)
+    idx, status = bouts.effort_subsample_index(B, R.run_id, k=int(e["k"]), b=int(e["b"]), seed=int(e["seed"]),
+                                               gap_s=gap)
     below = status[~status.effort_equalized]
     log(f"  effort: {int(status.effort_equalized.sum())}/{len(status)} runs have >= {e['k']} in-window active bouts"
         + (f"; below (no pose features): {', '.join(below.run_id)}" if len(below) else ""))
-    floor_s = cfg["bouts"]["refractory_s"] + cfg["bouts"]["floor_tol_s"]
-    A = features.tier_a(B, E, X, R, gap_s=gap, floor_s=floor_s)
+    A = features.tier_a(B, E, X, R, gap_s=gap)
     TM = features.timing_features(R, E, B, X, A, window=window, gap_s=gap,
                                   late_min_obs_s=cfg["features"]["late_min_obs_s"])
     TC = features.tier_c(R, cal, qc, det, B, idx, status, gap_s=gap)
@@ -260,7 +258,7 @@ def main(argv=None) -> None:
         return finish(project, info, warns, t0)
 
     log("[2/6] events")
-    R, E, blind = stage_events(project, cfg, runs, run_dirs, warns)
+    R, E, blind = stage_events(cfg, runs, run_dirs, warns)
     R.to_parquet(project.out_dir / "runs.parquet", index=False)
     E.to_parquet(project.out_dir / "events.parquet", index=False)
     info["blind_time"] = blind

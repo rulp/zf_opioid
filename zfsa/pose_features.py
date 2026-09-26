@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 
 from . import features, geometry
+from .bouts import PRIMARY_GAP_S
+from .infer import N_FISH
 
 ISO = 640.0 / 480.0  # canonical x -> isotropic units of tank height
 PLAT_HALF_W = geometry.CANONICAL_PLATFORM["w"] / 2
@@ -88,13 +90,13 @@ def frame_table(
     fid = d.groupby(["run_id", "frame_idx"], sort=False).ngroup().to_numpy()
     slot = d.fish_slot.to_numpy()
     nf = fid.max() + 1
-    assert not pd.Series(list(zip(fid, slot))).duplicated().any(), "duplicate fish slot in a frame"
-    assert slot.max() < 5
+    assert not d.duplicated(["run_id", "frame_idx", "fish_slot"]).any(), "duplicate fish slot in a frame"
+    assert slot.max() < N_FISH
 
-    P = np.full((nf, 5, 2), np.nan)
+    P = np.full((nf, N_FISH, 2), np.nan)
     P[fid, slot, 0], P[fid, slot, 1] = X, Y
     D = np.hypot(P[:, :, None, 0] - P[:, None, :, 0], P[:, :, None, 1] - P[:, None, :, 1])
-    D[:, np.arange(5), np.arange(5)] = np.nan
+    D[:, np.arange(N_FISH), np.arange(N_FISH)] = np.nan
     with warnings.catch_warnings():  # all-NaN slices are expected (empty slots, lone fish)
         warnings.simplefilter("ignore", RuntimeWarning)
         nn_fish = np.nanmin(D, axis=2)
@@ -110,14 +112,13 @@ def frame_table(
         "nontrig_pref_index": np.where(nt, (d_ina - d_act) / (d_ina + d_act), np.nan),
         "_cos": np.where(nt, np.cos(head), np.nan),
         "_sin": np.where(nt, np.sin(head), np.nan),
-        "_nt": nt.astype(float),
         "frac_in_rim": np.where(nt, rim.astype(float), np.nan),
     })
     g = rows.groupby("fid")
     F = g.mean()
-    n_nt = g["_nt"].sum()
+    n_nt = g["_cos"].count()  # non-trigger fish that have a heading
     F["polarization_nontrigger"] = np.where(n_nt >= 2, np.hypot(F["_cos"], F["_sin"]), np.nan)
-    F = F.drop(columns=["_cos", "_sin", "_nt"])
+    F = F.drop(columns=["_cos", "_sin"])
     F["mean_nn_distance"] = mean_nn[F.index]
     F["has_trigger_fish"] = pd.Series(has_trig).groupby(fid).first().loc[F.index].to_numpy()
     meta = d.groupby(fid)[["run_id", "frame_idx", "t_seconds"]].first()
@@ -130,23 +131,15 @@ def aggregate_runs(
     bouts: pd.DataFrame,
     index: pd.DataFrame,
     *,
-    gap_s: float = 5.0,
+    gap_s: float = PRIMARY_GAP_S,
 ) -> pd.DataFrame:
     """Frame -> bout mean -> draw mean -> median across draws.
 
     Also returns ``<feature>_mcsd``, the SD across draws: a per-run precision
     estimate. A large value means ``k`` bouts do not pin that run down.
     """
-    b = bouts[(bouts.gap_s == gap_s) & (bouts.platform == "active") & bouts.in_window]
-    parts = []
-    for run_id, bb in b.sort_values(["run_id", "t_start"]).groupby("run_id", sort=True):
-        ff = frames[frames.run_id == run_id]
-        if ff.empty:
-            continue
-        i = features.assign_bout(ff.t_seconds.to_numpy(), bb.t_start.to_numpy(), bb.t_end.to_numpy())
-        ff = ff[i >= 0].assign(bout_id=bb.bout_id.to_numpy()[i[i >= 0]])
-        parts.append(ff.groupby("bout_id")[cols].mean().assign(run_id=run_id).reset_index())
-    bout_means = pd.concat(parts, ignore_index=True)
+    f = features.attach_bout_id(frames, bouts, gap_s)
+    bout_means = f.groupby(["run_id", "bout_id"])[cols].mean().reset_index()
     merged = index[["run_id", "draw", "bout_id"]].merge(bout_means, on=["run_id", "bout_id"], how="left")
     per_draw = merged.groupby(["run_id", "draw"])[cols].mean()
     point = per_draw.groupby("run_id").median()

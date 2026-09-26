@@ -1,7 +1,7 @@
 """Bout-level and exposure tables, and the effort-equalisation draws.
 
-**Bouts are recomputed from the event times**, at the primary 5 s gap, rather
-than read from the event table.
+**Bouts are recomputed from the event times**, at the configured bout gap
+(``events.bout_gap_s``), rather than read from the event table.
 
 **Two window flags, because they answer different questions.** A bout counts
 toward the in-window *count* if any of its triggers falls inside the window;
@@ -65,23 +65,17 @@ def _bouts_for_series(
     bid = ev_mod.assign_bouts(t, gap_s)
     df = pd.DataFrame({"t": t.to_numpy(), "bout_id": bid.to_numpy()})
     df["in_win"] = (df.t >= lo) & (df.t <= hi)
+    # Intervals at the pump floor, counted within each bout.
+    df["at_floor"] = (df.t.diff() <= floor_s) & (df.bout_id == df.bout_id.shift())
 
-    g = df.groupby("bout_id", sort=True)
-    out = g.agg(
+    out = df.groupby("bout_id", sort=True).agg(
         t_start=("t", "min"),
         t_end=("t", "max"),
         n_triggers=("t", "size"),
         n_triggers_in_window=("in_win", "sum"),
+        n_at_floor=("at_floor", "sum"),
     ).reset_index()
     out["duration_s"] = out.t_end - out.t_start
-
-    # Intervals at the pump floor, counted within each bout.
-    iei = df.t.diff()
-    at_floor = (iei <= floor_s) & (df.bout_id == df.bout_id.shift())
-    floor_by_bout = at_floor.groupby(df.bout_id).sum().rename("n_at_floor").reset_index()
-    out = out.merge(floor_by_bout, on="bout_id", how="left")
-    out["n_at_floor"] = out.n_at_floor.fillna(0).astype("int64")
-
     out["time_bin"] = ev_mod.time_bin(out.t_start, bin_s)
     out["in_window"] = (out.t_start >= lo) & (out.t_end <= hi)
     out["overlaps_window"] = out.n_triggers_in_window > 0
@@ -105,8 +99,6 @@ def build_bout_table(
     frames: list[pd.DataFrame] = []
     for gap in gaps_s:
         for (run_id, platform), sub in post.groupby(["run_id", "platform"], sort=True):
-            if sub.empty:
-                continue
             b = _bouts_for_series(
                 sub.t_seconds.reset_index(drop=True),
                 gap_s=float(gap),
@@ -121,9 +113,19 @@ def build_bout_table(
 
     if not frames:
         return pd.DataFrame(columns=BOUT_COLUMNS)
-    out = pd.concat(frames, ignore_index=True)
-    out["n_triggers_in_window"] = out.n_triggers_in_window.astype("int64")
-    return out[BOUT_COLUMNS]
+    return pd.concat(frames, ignore_index=True)[BOUT_COLUMNS]
+
+
+def in_window_bouts(bouts: pd.DataFrame, gap_s: float = PRIMARY_GAP_S, platform: str | None = None) -> pd.DataFrame:
+    """Bouts at ``gap_s`` lying wholly inside the window, optionally on one platform.
+
+    The universe the effort draws, the pose aggregation and the QC covariates
+    all share -- they are joined on ``bout_id``, so they must agree.
+    """
+    m = (bouts.gap_s == gap_s) & bouts.in_window
+    if platform is not None:
+        m &= bouts.platform == platform
+    return bouts[m]
 
 
 def build_exposure_table(
@@ -180,6 +182,7 @@ def build_exposure_table(
 
 def effort_subsample_index(
     bouts: pd.DataFrame,
+    run_ids,
     *,
     k: int = 20,
     b: int = 200,
@@ -200,15 +203,20 @@ def effort_subsample_index(
     responding -- the failure mode the equalisation exists to prevent. Runs
     below ``k`` are marked ``effort_equalized=False`` and keep their full set.
 
+    ``run_ids`` is every run to report on; one with no qualifying bout gets a
+    status row with ``n_bouts_available=0``. Runs are drawn in sorted order,
+    so the draws do not depend on the order ``run_ids`` is given in.
+
     Returns ``(index, run_status)``.
     """
-    sub = bouts[(bouts.gap_s == gap_s) & (bouts.platform == platform) & bouts.in_window]
+    sub = in_window_bouts(bouts, gap_s, platform)
     rng = np.random.default_rng(seed)
+    by_run = {r: g.bout_id.to_numpy() for r, g in sub.groupby("run_id", sort=True)}
 
     idx_rows: list[pd.DataFrame] = []
     status_rows: list[dict] = []
-    for run_id, g in sub.groupby("run_id", sort=True):
-        ids = g.bout_id.to_numpy()
+    for run_id in sorted(set(run_ids)):
+        ids = by_run.get(run_id, ())
         n = len(ids)
         ok = n >= k
         status_rows.append(

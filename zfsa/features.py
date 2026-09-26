@@ -20,6 +20,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .bouts import PRIMARY_GAP_S, in_window_bouts
+
 #: Canonical-frame band along the tank rim (distance from the nearest wall).
 RIM_INNER = 0.0
 RIM_OUTER = 0.08
@@ -42,6 +44,21 @@ def assign_bout(t: np.ndarray, t_start: np.ndarray, t_end: np.ndarray) -> np.nda
     return np.where(ok, i, -1)
 
 
+def attach_bout_id(df: pd.DataFrame, bouts: pd.DataFrame, gap_s: float = PRIMARY_GAP_S) -> pd.DataFrame:
+    """Rows of ``df`` (with ``run_id``, ``t_seconds``) that fall inside an
+    in-window active bout, tagged with that bout's ``bout_id``."""
+    b = in_window_bouts(bouts, gap_s, "active").sort_values(["run_id", "t_start"])
+    by_run = dict(tuple(df.groupby("run_id", sort=False)))
+    parts = []
+    for run_id, bb in b.groupby("run_id", sort=True):
+        dd = by_run.get(run_id)
+        if dd is None:
+            continue
+        i = assign_bout(dd.t_seconds.to_numpy(), bb.t_start.to_numpy(), bb.t_end.to_numpy())
+        parts.append(dd[i >= 0].assign(bout_id=bb.bout_id.to_numpy()[i[i >= 0]]))
+    return pd.concat(parts) if parts else df.iloc[:0].assign(bout_id=pd.Series(dtype="int64"))
+
+
 # --------------------------------------------------------------------- Tier A
 
 
@@ -50,7 +67,6 @@ def _run_tier_a(
     b_ina: pd.DataFrame,
     t_act: np.ndarray,
     obs_min: float,
-    floor_s: float,
 ) -> dict:
     out: dict = {}
     n_act, n_ina = len(b_act), len(b_ina)
@@ -100,11 +116,10 @@ def tier_a(
     exposure: pd.DataFrame,
     runs: pd.DataFrame,
     *,
-    gap_s: float = 5.0,
-    floor_s: float = 0.7,
+    gap_s: float = PRIMARY_GAP_S,
 ) -> pd.DataFrame:
     """One row per run of event-timing features over the analysis window."""
-    b = bouts[(bouts.gap_s == gap_s) & bouts.in_window]
+    b = in_window_bouts(bouts, gap_s)
     b_act = {k: v for k, v in b[b.platform == "active"].groupby("run_id")}
     b_ina = {k: v for k, v in b[b.platform == "inactive"].groupby("run_id")}
 
@@ -120,7 +135,7 @@ def tier_a(
         exp = exp_by_run.get(run_id, exposure.iloc[:0])
         obs_min = float(exp.observed_time_s.sum()) / 60.0 if len(exp) else np.nan
         rec = {"run_id": run_id}
-        rec.update(_run_tier_a(ba, bi, t_by_run.get(run_id, np.array([])), obs_min, floor_s))
+        rec.update(_run_tier_a(ba, bi, t_by_run.get(run_id, np.array([])), obs_min))
         rec["observed_time_in_window_s"] = float(exp.observed_time_s.sum()) if len(exp) else np.nan
         rec["bin_slope"] = _bin_slope(ba, exp) if len(ba) else np.nan
         rows.append(rec)
@@ -138,7 +153,7 @@ def timing_features(
     tier_a_df: pd.DataFrame,
     *,
     window: tuple[float, float],
-    gap_s: float = 5.0,
+    gap_s: float = PRIMARY_GAP_S,
     late_min_obs_s: float = 300.0,
 ) -> pd.DataFrame:
     """Order-and-timing features, one row per run.
@@ -155,7 +170,8 @@ def timing_features(
     * ``first_active_latency_log`` -- the same for the active platform.
     """
     start, end_window = window
-    b = bouts[(bouts.gap_s == gap_s) & bouts.in_window]
+    b = in_window_bouts(bouts, gap_s)
+    b_by_run = dict(tuple(b.groupby("run_id", sort=False)))
     ina_ev = events[(events.platform == "inactive") & ~events.is_artifact & events.in_window]
     first_ina = ina_ev.groupby("run_id").t_seconds.min()
     late_obs = exposure[exposure.time_bin >= 3].groupby("run_id").observed_time_s.sum()
@@ -163,7 +179,7 @@ def timing_features(
     rows = []
     for r in runs.itertuples():
         rid = r.run_id
-        bb = b[b.run_id == rid].sort_values("t_start")
+        bb = b_by_run.get(rid, b.iloc[:0]).sort_values("t_start")
         act, ina = bb[bb.platform == "active"], bb[bb.platform == "inactive"]
         rec = {"run_id": rid}
 
@@ -195,37 +211,28 @@ def timing_features(
 # ------------------------------------------------------------------- Tier C
 
 
-def draw_mean_time_bin(index: pd.DataFrame, bouts: pd.DataFrame, *, gap_s: float = 5.0) -> pd.DataFrame:
+def draw_mean_time_bin(index: pd.DataFrame, bouts: pd.DataFrame, *, gap_s: float = PRIMARY_GAP_S) -> pd.DataFrame:
     """Mean time bin of each run's effort draws -- a QC covariate, not a feature.
 
     A run whose triggering collapses after the first bin yields pose samples
     drawn almost entirely from early in the session, so any pose difference is
     partly a difference in *when* it was measured.
     """
-    b = bouts[(bouts.gap_s == gap_s) & (bouts.platform == "active") & bouts.in_window]
+    b = in_window_bouts(bouts, gap_s, "active")
     m = index.merge(b[["run_id", "bout_id", "time_bin"]], on=["run_id", "bout_id"], how="left")
     return m.groupby("run_id").time_bin.mean().rename("subsample_mean_time_bin").reset_index()
 
 
-def trigger_fish_present_fraction(det: pd.DataFrame, bouts: pd.DataFrame, *, gap_s: float = 5.0) -> pd.DataFrame:
+def trigger_fish_present_fraction(det: pd.DataFrame, bouts: pd.DataFrame, *,
+                                  gap_s: float = PRIMARY_GAP_S) -> pd.DataFrame:
     """Per run: mean over active bouts of the share of detections that are the trigger fish.
 
     Low values mean the fish that caused the dose was often not identified
     inside the active ROI, which weakens every trigger-fish feature.
     """
-    b = bouts[(bouts.gap_s == gap_s) & (bouts.platform == "active") & bouts.in_window]
-    rows = []
-    for run_id, bb in b.sort_values(["run_id", "t_start"]).groupby("run_id", sort=True):
-        dd = det[det.run_id == run_id]
-        if dd.empty:
-            continue
-        i = assign_bout(dd.t_seconds.to_numpy(), bb.t_start.to_numpy(), bb.t_end.to_numpy())
-        dd = dd[i >= 0].assign(_b=i[i >= 0])
-        if dd.empty:
-            continue
-        rows.append({"run_id": run_id,
-                     "trigger_fish_present_fraction": float(dd.groupby("_b").is_trigger_fish.mean().mean())})
-    return pd.DataFrame(rows, columns=["run_id", "trigger_fish_present_fraction"])
+    d = attach_bout_id(det, bouts, gap_s)
+    per_bout = d.groupby(["run_id", "bout_id"]).is_trigger_fish.mean()
+    return per_bout.groupby("run_id").mean().rename("trigger_fish_present_fraction").reset_index()
 
 
 def run_detection_qc(frame_qc: pd.DataFrame) -> pd.DataFrame:
@@ -251,7 +258,7 @@ def tier_c(
     effort_index: pd.DataFrame,
     effort_status: pd.DataFrame,
     *,
-    gap_s: float = 5.0,
+    gap_s: float = PRIMARY_GAP_S,
 ) -> pd.DataFrame:
     """QC covariates per run. Tested against the clusters, never used as features."""
     out = runs[["run_id", "blind_fraction", "covers_window", "run_order_within_day",

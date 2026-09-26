@@ -1,4 +1,4 @@
-"""Run-level PCA -> Gaussian mixture on the 14 pose, timing and trigger features.
+"""Run-level PCA -> Gaussian mixture on the pose, timing and trigger features.
 
 The unit is the **run** (five fish shoal, so triggers within a run are not
 independent). Everything here is exploratory and hypothesis-generating; it is
@@ -6,8 +6,8 @@ not a hit gate.
 
 Pipeline, all reading the tables ``run_pipeline.py`` writes to ``out/``:
 
-1. **Features.** 3 trigger rates (Tier A), 5 timing features and 6 pose
-   features per run. Runs below the effort floor (< k in-window active bouts)
+1. **Features.** The trigger (Tier A), timing and pose features listed in
+   ``analysis.features`` (14 by default), one value each per run. Runs below the effort floor (< k in-window active bouts)
    have no pose features and are not scored; a run missing more than
    ``max(1, 10% of p)`` features is not scored; residual gaps are imputed to
    the vehicle median.
@@ -78,9 +78,8 @@ CATALOG: dict[str, tuple[str, str, str, str]] = {
         "log(1 + s from window start to first active trigger)"),
 }
 
-INPUT_TABLES = ["runs", "events", "bouts", "exposure", "effort_index", "effort_status",
-                "calibration", "pose_detections", "pose_frame_qc", "features_tier_a",
-                "features_timing", "features_tier_c"]
+INPUT_TABLES = ["runs", "bouts", "effort_index", "effort_status", "calibration", "pose_detections",
+                "features_tier_a", "features_timing", "features_tier_c"]
 
 
 def construct(f: str) -> str:
@@ -178,7 +177,6 @@ def run(out_dir: Path, cfg: dict, *, log=print) -> dict:
     grid_kw = {"k_max": int(a["k_max"]), "cov_types": list(a["covariance_types"]), "n_init": N_INIT,
                "min_cluster_n": int(a["min_cluster_n"])}
     DEGENERATE_EIG, MAD_SD_MIN = float(a["degenerate_eig"]), float(a["mad_sd_min"])
-    window = config_mod.window(cfg)
 
     HERE = Path(out_dir) / "pca_gmm"
     FIG = HERE / "figures"
@@ -465,39 +463,40 @@ def run(out_dir: Path, cfg: dict, *, log=print) -> dict:
         rows.append({"kind": kind, "variable": name, "statistic": stat_name, "value": obs,
                      "p_perm": p, "permutation": note})
 
+    def add_kw(kind, v_):
+        vals = C[v_].astype(float).to_numpy()
+        okm = np.isfinite(vals)
+        add(kind, v_, "Kruskal-Wallis H", lambda L: gmm.kw_h(vals[okm], L[okm]), date, "within date")
+
+    # prng is shared, so the order of these calls fixes every p-value.
     add("nuisance", "date", "Cramér's V", lambda L: gmm.cramers_v(L, date), none, "unrestricted")
     grp = C.fish_group_resolved.astype(str).to_numpy()
     add("nuisance", "fish_group_resolved", "Cramér's V", lambda L: gmm.cramers_v(L, grp), none, "unrestricted")
     for v_ in ["run_order_within_day", "mean_conf_5th", "frac_frames_under_5", "mean_max_iou",
                "subsample_mean_time_bin", "blind_fraction", "n_bouts_available", "trigger_fish_present_fraction"]:
-        vals = C[v_].astype(float).to_numpy()
-        okm = np.isfinite(vals)
-        add("nuisance", v_, "Kruskal-Wallis H", lambda L, vals=vals, okm=okm: gmm.kw_h(vals[okm], L[okm]),
-            date, "within date")
+        add_kw("nuisance", v_)
     isv = C.is_vehicle.to_numpy()
     add("design", "is_vehicle", "Cramér's V", lambda L: gmm.cramers_v(L, isv), date, "within date")
     val_vars = ["active_bout_rate_per_obs_min", "inactive_bout_rate_per_obs_min", "logodds_active",
                 "n_active_bouts_in_window"]
     for v_ in val_vars:
-        vals = C[v_].astype(float).to_numpy()
-        okm = np.isfinite(vals)
-        add("validator", v_, "Kruskal-Wallis H", lambda L, vals=vals, okm=okm: gmm.kw_h(vals[okm], L[okm]),
-            date, "within date")
+        add_kw("validator", v_)
     tests = pd.DataFrame(rows)
     cond = C.condition.to_numpy()
+    # Permuting within date keeps each condition's run count, so the set of
+    # replicated (n >= 2) non-vehicle conditions is fixed across permutations.
     counts = pd.Series(cond).value_counts()
-    elig = np.array([(c != VEHICLE) and counts[c] >= 2 for c in cond])
-    obs_rep = gmm.co_cluster_rate(labels, cond, elig)
+    replicated = counts.index[(counts >= 2) & (counts.index != VEHICLE)]
+    obs_rep = gmm.co_cluster_rate(labels, cond, np.isin(cond, replicated))
+    date_groups = gmm.strata_groups(date)
     null_rep = []
     for _ in range(N_PERM):
-        cp = gmm.permute_within(cond, date, prng)
-        cnt = pd.Series(cp).value_counts()
-        el = np.array([(c != VEHICLE) and cnt[c] >= 2 for c in cp])
-        null_rep.append(gmm.co_cluster_rate(labels, cp, el))
+        cp = gmm.permute_within(cond, date_groups, prng)
+        null_rep.append(gmm.co_cluster_rate(labels, cp, np.isin(cp, replicated)))
     null_rep = np.array(null_rep)
     p_rep = float((1 + (null_rep >= obs_rep).sum()) / (1 + N_PERM))
     dmso_rate = gmm.co_cluster_rate(labels, cond, cond == VEHICLE)
-    base_rate = float((np.bincount(labels) / n) @ (np.bincount(labels) / n))
+    base_rate = float((cluster_sizes / n) @ (cluster_sizes / n))
     tests = pd.concat([tests, pd.DataFrame([{
         "kind": "design", "variable": "same-condition replicate co-clustering (non-vehicle, n>=2)",
         "statistic": "same-cluster pair rate", "value": obs_rep, "p_perm": p_rep,
@@ -690,7 +689,7 @@ Generated by `run_pipeline.py` in {time.time() - t0:.0f} s (analysis step). Expl
 ## Data and features
 
 - {n} runs scored ({int(veh.sum())} vehicle) of {n_cand} with pose features and {len(R)} in the metadata after exclusions. {len(excluded)} not scored{': ' + '; '.join(f'{r.run_id} ({r.reason})' for r in excluded.itertuples()) if len(excluded) else ''}.
-- **{len(FEATURES)} fixed features**: 3 trigger rates from the event TSVs, 5 timing features, 6 pose features from the YOLO keypoints (listed below).
+- **{len(FEATURES)} fixed features**: {len(trig_cols)} trigger features from the event TSVs, {len(FEATURES) - len(trig_cols) - len(pose_cols)} timing features, {len(pose_cols)} pose features from the YOLO keypoints (listed below).
 - **Primary scaling is rank-normal scores.** Features were transformed (logit for proportions, log1p for rates), EB day-centred on the vehicle runs, then converted to normal scores Φ⁻¹((rank − 0.5)/n). In vehicle-MAD units the largest |z| was {', '.join(f'{f} {v:.0f}' for f, v in mad_max_abs.sort_values(ascending=False).head(3).items())}; features with tight controls and widely spread treated runs would alone define PC1. Normal scores give every feature equal weight; the vehicle-MAD version is refitted as a robustness check below.
 - Missing values: {n_imputed} residual missing cell(s) imputed to the vehicle median (at most {allow} per run).
 - Scaling guard (vehicle-MAD robustness version): where the vehicle MAD is below {MAD_SD_MIN:g} × the vehicle SD, the vehicle SD is used instead: {', '.join(f'{r.feature} ({r.method})' for r in scale_rep.itertuples() if r.method != 'mad') or 'none needed'}.

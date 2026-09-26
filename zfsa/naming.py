@@ -42,7 +42,8 @@ _RE_G_PLAIN = re.compile(_BOUNDARY + r"[gG](\d)(?![0-9])")
 
 def parse_group(name: str) -> str | None:
     """Return the fish group id (``"2"``, ``"2.5"``, ...) or None if absent."""
-    tail = _strip_stamp(name)
+    # Drop the dose first so that 'g2_5uM' reads as group 2 at 5 uM, not group 2.5.
+    _, tail = parse_dose(name)
     m = _RE_G_NFISH.search(tail)
     if m:
         return m.group(1)
@@ -58,9 +59,9 @@ def parse_group(name: str) -> str | None:
 # --- dose ------------------------------------------------------------------
 
 _NUM = r"(\d+(?:\.\d+)?)"
-_RE_DOSE_UM = re.compile(_NUM + r"\s*[_ ]?\s*uM\b", re.I)
-_RE_DOSE_MGL = re.compile(_NUM + r"\s*[_ ]?\s*mg[ _]?per[ _]?L\b", re.I)
-_RE_DOSE_UL = re.compile(_NUM + r"\s*[_ ]?\s*uL\b", re.I)
+_RE_DOSE_UM = re.compile(_NUM + r"\s*[_ ]?\s*uM" + _END, re.I)
+_RE_DOSE_MGL = re.compile(_NUM + r"\s*[_ ]?\s*mg[ _]?per[ _]?L" + _END, re.I)
+_RE_DOSE_UL = re.compile(_NUM + r"\s*[_ ]?\s*uL" + _END, re.I)
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,8 @@ def parse_compound(name: str, aliases: dict[str, str] | None = None) -> tuple[st
     """
     aliases = aliases or {"dmso": "DMSO"}
     _, tail = parse_dose(name)
+    for rx, _label in _FAILURE_PATTERNS:  # failure notes are flags, not part of the compound
+        tail = rx.sub(" ", tail)
     tail = _RE_NOISE.sub(" ", tail)
     tail = re.sub(r"[_\-.]+", " ", tail)
     tail = re.sub(r"\s+", " ", tail).strip()
@@ -143,7 +146,7 @@ _FAILURE_PATTERNS = [
     (re.compile(r"lethal", re.I), "lethal"),
     (re.compile(r"disconnected[_ ]?tube", re.I), "disconnected tube"),
     (re.compile(r"bugged[_ ]?pump", re.I), "bugged pump"),
-    (re.compile(r"\bdied?\b|\bdeath\b", re.I), "death"),
+    (re.compile(r"(?<![A-Za-z0-9])(?:died?|death)" + _END, re.I), "death"),
 ]
 
 

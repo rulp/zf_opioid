@@ -19,8 +19,6 @@ confounded with day in this design.
 
 from __future__ import annotations
 
-from itertools import combinations
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -136,7 +134,12 @@ def boot_rep(S, K, cov, seed, ref_labels, n_init=20):
 
 # --------------------------------------------------------------- statistics
 def cramers_v(a, b) -> float:
-    ct = pd.crosstab(pd.Series(a), pd.Series(b)).to_numpy()
+    # Contingency table by integer codes; called once per permutation, where
+    # pd.crosstab would dominate the run time.
+    _, ai = np.unique(np.asarray(a), return_inverse=True)
+    _, bi = np.unique(np.asarray(b), return_inverse=True)
+    ct = np.zeros((ai.max() + 1, bi.max() + 1), dtype=np.int64)
+    np.add.at(ct, (ai, bi), 1)
     if min(ct.shape) < 2:
         return 0.0
     chi2 = stats.chi2_contingency(ct, correction=False)[0]
@@ -145,33 +148,43 @@ def cramers_v(a, b) -> float:
 
 def kw_h(values, labels) -> float:
     groups = [values[labels == k] for k in np.unique(labels)]
-    groups = [g for g in groups if len(g)]
     if len(groups) < 2 or np.ptp(values) == 0:
         return 0.0
     return float(stats.kruskal(*groups).statistic)
 
 
-def permute_within(labels: np.ndarray, strata: np.ndarray, rng) -> np.ndarray:
+def strata_groups(strata: np.ndarray) -> list[np.ndarray]:
+    """Row indices of each stratum, for :func:`permute_within`."""
+    return [np.flatnonzero(strata == s) for s in np.unique(strata)]
+
+
+def permute_within(labels: np.ndarray, groups: list[np.ndarray], rng) -> np.ndarray:
+    """Shuffle ``labels`` within each index group from :func:`strata_groups`."""
     out = labels.copy()
-    for s in np.unique(strata):
-        i = np.flatnonzero(strata == s)
+    for i in groups:
         out[i] = labels[rng.permutation(i)]
     return out
 
 
 def perm_p(stat_fn, labels, strata, n, rng) -> tuple[float, float]:
     obs = stat_fn(labels)
-    null = np.array([stat_fn(permute_within(labels, strata, rng)) for _ in range(n)])
+    groups = strata_groups(strata)
+    null = np.array([stat_fn(permute_within(labels, groups, rng)) for _ in range(n)])
     return obs, float((1 + (null >= obs - 1e-12).sum()) / (1 + n))
 
 
 def co_cluster_rate(labels: np.ndarray, cond: np.ndarray, eligible: np.ndarray) -> float:
-    same, tot = 0, 0
-    for c in np.unique(cond[eligible]):
-        i = np.flatnonzero((cond == c) & eligible)
-        for a, b in combinations(i, 2):
-            tot += 1
-            same += labels[a] == labels[b]
+    """Share of same-condition pairs (among ``eligible`` runs) that share a cluster."""
+    if not eligible.any():
+        return np.nan
+    _, ci = np.unique(cond[eligible], return_inverse=True)
+    _, li = np.unique(labels[eligible], return_inverse=True)
+
+    def n_pairs(sizes):
+        return int((sizes * (sizes - 1) // 2).sum())
+
+    tot = n_pairs(np.bincount(ci))
+    same = n_pairs(np.bincount(ci * (li.max() + 1) + li))
     return same / tot if tot else np.nan
 
 
