@@ -12,6 +12,21 @@ land where.
 The trained pose model is included (`models/best.pt`), so nothing needs training. You supply the
 run folders and a metadata file saying what each run was.
 
+## The assay
+
+This pipeline is built for the zebrafish opioid self-administration assay of
+[Bossé & Peterson (2017)](https://doi.org/10.1016/j.bbr.2017.08.001):
+- A shallow tank has two raised platforms in opposite corners.
+- A fish over the yellow (active) platform triggers a dose of hydrocodone. The white (inactive)
+  platform delivers saline.
+- An overhead camera detects the triggers and saves a photo of every active one.
+- Each run is 5 fish for 50 minutes.
+
+![Experimental set-up](docs/figures/setup_diagram.png)
+
+**The pipeline assumes this set-up.** Calibration, the platform layout and the pose model are all
+specific to it; see [Assumptions and limits](#assumptions-and-limits).
+
 ## Setup
 
 Python 3.13. From this folder:
@@ -110,6 +125,11 @@ Start with **`pca_gmm/REPORT.md`** and **`pca_gmm/figures/08_clusters_PC1_PC2.pn
 `pca_gmm/cluster_compounds.md` lists which compounds are in which cluster, and
 `pca_gmm/gmm_assignments.csv` gives every run's cluster.
 
+![Example PC1 × PC2 plot](docs/figures/example_clusters_PC1_PC2.png)
+
+*Example output from the 94-run development set (87 runs scored). The two clusters are a
+descriptive cut of a continuum, not discrete behavioural states.*
+
 The analysis treats **"no clusters" (K = 1) as a real answer**, and several checks guard against
 finding structure that is not there:
 - **ΔBIC and p_null.** BIC must beat a single Gaussian by at least 2. p_null is how often data
@@ -174,6 +194,16 @@ should be comparable to other lab members'.
   specificity check.
 - Everything here is exploratory. It is not a statistical test for hits.
 
+## Citation
+
+If you use this pipeline, please cite the assay it was built for:
+
+> Bossé GD, Peterson RT (2017). Development of an opioid self-administration assay to study drug
+> seeking in zebrafish. *Behavioural Brain Research* 335:158–166.
+> [doi:10.1016/j.bbr.2017.08.001](https://doi.org/10.1016/j.bbr.2017.08.001)
+
+The same reference is in `CITATION.cff`, which GitHub shows as "Cite this repository".
+
 ## Layout
 
 ```
@@ -182,6 +212,8 @@ make_metadata.py     drafts metadata.csv
 params.yaml          settings (optional)
 models/best.pt       YOLOv11-pose weights: 3 keypoints (head, centre, tail)
 tests.py             unit tests
+CITATION.cff         how to cite
+docs/figures/        README figures
 zfsa/                the code, one module per step:
   paths, config, naming, metadata, events, geometry, infer, bouts,
   features, pose_features, normalize, gmm, analysis
