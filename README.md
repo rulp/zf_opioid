@@ -14,18 +14,29 @@ run folders and a metadata file saying what each run was.
 
 ## The assay
 
-This pipeline is built for the zebrafish opioid self-administration assay of
-[Bossé & Peterson (2017)](https://doi.org/10.1016/j.bbr.2017.08.001):
+This pipeline is built for a modified version of the zebrafish opioid self-administration assay
+of [Bossé & Peterson (2017)](https://doi.org/10.1016/j.bbr.2017.08.001) (original apparatus:
+Fig. 1 of the paper):
 - A shallow tank has two raised platforms in opposite corners.
 - A fish over the yellow (active) platform triggers a dose of hydrocodone. The white (inactive)
   platform delivers saline.
-- An overhead camera detects the triggers and saves a photo of every active one.
 - Each run is 5 fish for 50 minutes.
 
-![Experimental set-up](docs/figures/setup_diagram.png)
+Differences from the published set-up are in the camera and trigger detection:
+- An overhead 640×480 colour camera records at about 29.4 fps.
+- A trigger is a fish over a platform, detected by its contrast against a dynamic background
+  model. The two platforms are thresholded independently.
+- A JPEG is saved for every active trigger. These photos are what the pose model reads.
+
+![Our set-up (modified from Bossé & Peterson 2017)](docs/figures/setup_diagram.png)
+
+*Our set-up (modified from Bossé & Peterson 2017).*
 
 **The pipeline assumes this set-up.** Calibration, the platform layout and the pose model are all
 specific to it; see [Assumptions and limits](#assumptions-and-limits).
+
+[`docs/protocol.md`](docs/protocol.md) covers how a run is carried out, and how to plan runs so
+the pipeline can analyse them.
 
 ## Setup
 
@@ -213,6 +224,7 @@ params.yaml          settings (optional)
 models/best.pt       YOLOv11-pose weights: 3 keypoints (head, centre, tail)
 tests.py             unit tests
 CITATION.cff         how to cite
+docs/protocol.md     how a run is carried out
 docs/figures/        README figures
 zfsa/                the code, one module per step:
   paths, config, naming, metadata, events, geometry, infer, bouts,
